@@ -1,0 +1,4 @@
+.vagrant
+.env
+local
+cpanfile.snapshot

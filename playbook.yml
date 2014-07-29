@@ -1,0 +1,154 @@
+- hosts: all
+  sudo: yes
+  tasks:
+    - name: install mysql repository
+      yum: name={{ item }} state=installed
+      with_items:
+      - http://dev.mysql.com/get/mysql-community-release-el6-5.noarch.rpm
+    - name: install common packages
+      yum: name={{ item }} state=installed
+      with_items:
+      - git
+      - gcc
+      - automake
+      - openssl
+      - openssl-devel
+      - libpcap
+      - libpcap-devel
+      - wget
+      - telnet
+      - man
+    - name: create swap
+      shell: >-
+        dd if=/dev/zero of=/swapfile bs=1024 count=1M &&
+        sync && sync && sleep 1 &&
+        mkswap /swapfile &&
+        swapon /swapfile &&
+        echo "/swapfile swap    swap    defaults    0 0" >> /etc/fstab &&
+        chown root.root /swapfile &&
+        chmod 600 /swapfile &&
+        echo "vm.swappiness=10" >> /etc/sysctl.conf
+        creates=/swapfile
+    - name: update packages
+      yum: name=* state=latest
+    - name: install miruo
+      shell: >-
+        (ls ./miruo || git clone https://github.com/KLab/miruo.git) &&
+        cd miruo &&
+        ./configure &&
+        make &&
+        make install
+        creates=/usr/local/bin/miruo
+
+- hosts: servers
+  sudo: yes
+  tasks:
+    - name: install server packages
+      yum: name={{ item }} state=installed
+      with_items:
+      - httpd
+      - mod_ssl
+      - mod_perl
+      - memcached*
+    - name: create plenv user
+      user: name=plenv comment="Perl Environment"
+    - name: run memcached
+      service: name=memcached state=running enabled=yes
+    - name: run httpd
+      service: name=httpd state=running enabled=yes
+    - name: install plenv
+      shell: >-
+        mkdir ~/.plenv &&
+        git clone git://github.com/tokuhirom/plenv.git ~/.plenv &&
+        echo 'export PATH="~/.plenv/bin:$PATH"' >> ~/.bash_profile &&
+        echo 'eval "$(plenv init -)"' >> ~/.bash_profile &&
+        git clone git://github.com/tokuhirom/Perl-Build.git ~/.plenv/plugins/perl-build/ &&
+        ~/.plenv/bin/plenv install 5.18.1 &&
+        ~/.plenv/bin/plenv rehash &&
+        ~/.plenv/bin/plenv global 5.18.1 &&
+        ~/.plenv/bin/plenv install-cpanm &&
+        ~/.plenv/bin/plenv rehash &&
+        ~/.plenv/shims/cpanm --local-lib=~/perl5 local::lib &&
+        echo 'eval $(perl -I ~/perl5/lib/perl5/ -Mlocal::lib)' >> ~/.bash_profile
+        creates=~/.plenv
+        chdir=~
+      sudo_user: plenv
+    - name: app
+      shell: >-
+        source ~/.bash_profile &&
+        cp /vagrant/myapp.pl ~/ &&
+        cp /vagrant/cpanfile ~/ &&
+        cpanm --installdeps . &&
+        hypnotoad myapp.pl
+        chdir=~
+      sudo_user: plenv
+    - name: index
+      copy: src=index dest=/var/www/html/index
+
+- hosts: lb
+  sudo: yes
+  tasks:
+    - name: install haproxy
+      shell: >-
+        wget http://www.haproxy.org/download/1.5/src/haproxy-1.5.2.tar.gz &&
+        tar -zxf haproxy-1.5.2.tar.gz &&
+        cd haproxy-1.5.2 &&
+        make -j 2 TARGET=linux2628 &&
+        make install
+        creates=/usr/local/sbin/haproxy
+    - name: init haproxy
+      copy: src=haproxy-init dest=/etc/init.d/haproxy mode=755
+    - name: create /var/lib/haproxy
+      file: path=/var/lib/haproxy state=directory
+    - name: config haproxy
+      template: src=haproxy.cfg.j2 dest=/etc/haproxy.cfg
+    - name: run haproxy
+      service: name=haproxy state=running enabled=yes
+
+- hosts: clients
+  sudo: yes
+  tasks:
+    - name: install client packages
+      yum: name={{ item }} state=installed
+      with_items:
+      - java-1.7.0-openjdk
+    - name: install go
+      shell: >-
+        wget http://golang.org/dl/go1.3.linux-amd64.tar.gz &&
+        tar -C /usr/local -xzf go1.3.linux-amd64.tar.gz &&
+        echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
+        creates=/usr/local/go/bin/go
+    - name: install gatling
+      shell: >-
+        wget https://dl.dropboxusercontent.com/u/2353302/gatling-charts-highcharts-2.0.0-M3a-bundle.tar.gz &&
+        tar -C /usr/local/ -zxf ./gatling-charts-highcharts-2.0.0-M3a-bundle.tar.gz &&
+        echo 'export PATH=$PATH:/usr/local/gatling-charts-highcharts-2.0.0-M3a/bin' >> /etc/profile
+        creates=/usr/local/gatling-charts-highcharts-2.0.0-M3a/bin/gatling.sh
+    - name: install gatling simulation
+      shell: >-
+        mkdir -p /usr/local/gatling-charts-highcharts-2.0.0-M3a/user-files/simulations/bench &&
+        cp /vagrant/BenchSimulation.scala /usr/local/gatling-charts-highcharts-2.0.0-M3a/user-files/simulations/bench/
+    - name: isntall wrk
+      shell: >-
+        (ls ./wrk || git clone https://github.com/wg/wrk.git) &&
+        cd wrk &&
+        make &&
+        cp ./wrk /usr/local/bin/
+        creates=/usr/local/bin/wrk
+    - name: install nodejs
+      shell: >-
+        wget http://nodejs.org/dist/v0.10.29/node-v0.10.29-linux-x64.tar.gz &&
+        tar -C /usr/local -zxf node-v0.10.29-linux-x64.tar.gz
+        creates=/usr/local/bin/node
+    - name: install python-devel(for locust)
+      yum: name=python-devel state=installed
+    - name: install locust
+      shell: >-
+        easy_install locustio
+        creates=/usr/local/bin/locust
+    - name: install jmeter
+      shell: >-
+        wget http://ftp.kddilabs.jp/infosystems/apache//jmeter/binaries/apache-jmeter-2.11.tgz &&
+        tar -C /usr/local -zxf apache-jmeter-2.11.tgz 
+        creates=/usr/local/apache-jmeter-2.11/bin/jmeter
+
